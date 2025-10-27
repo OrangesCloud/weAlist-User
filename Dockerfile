@@ -1,43 +1,30 @@
-# 1단계: 'builder' 스테이지
-# Java 17 JDK 이미지를 사용하여 프로젝트를 빌드합니다.
-FROM eclipse-temurin:17-jdk-jammy AS builder
+# Build stage
+FROM gradle:8.5.0-jdk17 AS builder
+WORKDIR /home/gradle/src
 
-# 작업 디렉토리 설정
-WORKDIR /app
+# 의존성 캐시를 위해 먼저 복사
+COPY --chown=gradle:gradle build.gradle settings.gradle ./
+COPY --chown=gradle:gradle gradle ./gradle
+RUN gradle dependencies --no-daemon
 
-# Gradle 관련 파일들을 먼저 복사합니다.
-# (의존성이 변경되지 않았다면 이 레이어를 캐시에서 재사용)
-COPY gradlew .
-COPY gradle ./gradle
-COPY build.gradle .
-COPY settings.gradle .
+# 소스 복사 및 빌드
+COPY --chown=gradle:gradle src ./src
+RUN gradle bootJar --no-daemon
 
-# (선택적) 의존성만 먼저 다운로드하여 레이어 캐시 활용
-# RUN ./gradlew dependencies
-
-# 소스 코드 전체 복사
-COPY src ./src
-
-# gradlew에 실행 권한 부여
-RUN chmod +x ./gradlew
-
-# CI/CD 파이프라인에서는 테스트를 별도 단계로 빼므로,
-# Docker 빌드 시에는 테스트를 스킵하여 빌드 속도를 높입니다.
-RUN ./gradlew build -x test
-
-# 2단계: 'runner' 스테이지
-# 실제 실행을 위한 JRE(Java Runtime Environment) 이미지를 사용합니다.
-# JDK가 아닌 JRE를 사용하여 이미지 크기를 대폭 줄입니다.
+# Runtime stage
 FROM eclipse-temurin:17-jre-jammy
+ENV TZ=Asia/Seoul
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
+# 비root 사용자
+RUN groupadd -r spring && useradd -r -g spring spring
 WORKDIR /app
+USER spring:spring
 
-# README에서 8080 포트를 사용하므로 동일하게 설정
+COPY --from=builder --chown=spring:spring /home/gradle/src/build/libs/*.jar app.jar
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
 EXPOSE 8080
-
-# builder 스테이지에서 빌드된 JAR 파일만 복사
-# build/libs/ 안에 있는 .jar 파일을 app.jar 라는 이름으로 복사합니다.
-COPY --from=builder /app/build/libs/*.jar app.jar
-
-# 컨테이너가 시작될 때 app.jar 파일을 실행
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
